@@ -1,0 +1,530 @@
+<?php
+
+use \Drupal\node\Entity\Node;
+
+/* Slack api request */
+function slack_api_request($apiPath = null, $postFields = null) {
+    $slackApiToken = 'add your api key here';
+    $postFields['token'] = $slackApiToken;
+    $ch = curl_init('https://slack.com/api/' . $apiPath);
+    $data = http_build_query($postFields);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    $result = curl_exec($ch);
+    curl_close($ch);
+
+    $result = json_decode($result, true);
+    if (isset($result['ok'])) {
+        return $result;
+    }
+}
+
+/* slack integration */
+/* fetching top 5 messages */
+function get_top_conv(int $stack = 0, $cid = null) {
+    $conv_history = get_slack_conv_history($cid);
+    if (!empty($conv_history[$stack])) {
+        return $conv_history[$stack];
+    }
+    return "";
+}
+
+/* calling channel history method to get top 5 messages */
+function get_slack_conv_history($cid = null) {
+    if (!empty($cid)) {
+        $slackHistoryCount = 5;
+        $conv_history = get_channel_history($cid, $slackHistoryCount);
+        $order = 'asc';
+        if ($order != 'asc') {
+            $conv_history = array_reverse($conv_history);
+        }
+        return $conv_history;
+    }
+    return "";
+}
+
+/* fetching the messages of specific channel */
+function get_channel_history($channelId = null, $history_count = null) {
+    $cacheDirectory = sys_get_temp_dir();
+    $channelCacheFilename = $cacheDirectory . '/.channel-cache.tmp.json';
+    $channelCacheTimeout = 60;
+    $channel_history = '';
+    if ($channel_history) {
+        return $channel_history;
+    }
+    $has_more = false;
+    $channel_history = [];
+    $fetch_from_ts = time();
+    if (isset($channel_history)) {
+        do {
+            $h = slack_api_request('conversations.history', [
+                'channel' => $channelId,
+                'count' => 1,
+                'latest' => $fetch_from_ts,
+                'Content-type' => 'text/html',
+            ]);
+            if (isset($h['messages'])) {
+                $chat_messages = array_chunk($h['messages'], $history_count);
+                foreach ($chat_messages as $cm) {
+                    array_push($channel_history, $cm);
+                }
+                if (isset($chat_messages[0]) && isset($chat_messages[0][0])) {
+                    $fetch_from_ts = $chat_messages[0][0]['ts'];
+                }
+            }
+            if (isset($h['has_more'])) {
+                $has_more = false;
+            } else {
+                $has_more = false;
+            }
+        } while ($has_more);
+    }
+    write_to_cache($channelCacheFilename, $channel_history);
+    return $channel_history;
+}
+
+/* fetching emojis */
+function get_all_emojis() {
+    global $emojiCacheFilename;
+    global $emojiCacheTimeout;
+    $cacheDirectory = sys_get_temp_dir();
+    $emojiCacheFilename = $cacheDirectory . '/.emoji-cache.tmp.json';
+    $userlistCacheTimeout = 300;
+    $emojiCacheTimeout = 3600;
+    $all_emojis = read_from_cache($emojiCacheFilename, $emojiCacheTimeout);
+    if ($all_emojis) {
+        return $all_emojis;
+    }
+    if (isset($channelId)) {
+        $all_emojis = slack_api_request('emoji.list', [
+            "channel" => $channelId,
+            'Content-type' => 'text/html',
+        ]);
+    }
+    $all_emojis = $all_emojis['emoji'];
+    $json_path = 'emojis.json';
+    $json_file = $_SERVER['DOCUMENT_ROOT'] . $json_path;
+    $standard_emojis = json_decode(file_get_contents($json_file), true);
+    if (isset($standard_emojis)) {
+        foreach ($standard_emojis as $e) {
+            $as_html = '';
+            $us = explode('-', $e['unified']);
+            $as_html = '';
+            foreach ($us as $u) {
+                $as_html .= '&#x' . $u . ';';
+            }
+            foreach ($e['short_names'] as $short_name) {
+                $all_emojis[$short_name] = $as_html;
+            }
+        }
+    }
+    $all['slightly_smiling_face'] = 'alias:wink';
+    $all['white_frowning_face'] = 'alias:sad';
+    write_to_cache($emojiCacheFilename, $all_emojis);
+    return $all_emojis;
+}
+
+/* fetching slack users list */
+function get_all_users() {
+    $userlistCacheTimeout = 300;
+    $cacheDirectory = sys_get_temp_dir();
+    $userlistCacheFilename = $cacheDirectory . '/.users-cache.tmp.json';
+    $userlist = read_from_cache($userlistCacheFilename, $userlistCacheTimeout);
+    if ($userlist) {
+        return $userlist;
+    }
+    $userlist = slack_api_request('users.list', [
+        'limit' => 800,
+        'presence' => false,
+        'Content-type' => 'text/html',
+    ]);
+    // Format in a more sane way
+    $userlistIndexed = [];
+    if (isset($userlist['members'])) {
+        foreach ($userlist['members'] as $user) {
+            $userlistIndexed[$user['id']] = $user;
+        }
+    }
+    write_to_cache($userlistCacheFilename, $userlistIndexed);
+    return $userlistIndexed;
+}
+
+function read_from_cache($cacheFilename = null, $cacheTimeout = null) {
+    $lastModified = @filemtime($cacheFilename);
+    if (!$lastModified) {
+        return null;
+    }
+    if (time() - $lastModified > $cacheTimeout) {
+        return null;
+    }
+    return json_decode(file_get_contents($cacheFilename), true);
+}
+
+function write_to_cache($cacheFilename = null, $cacheThisObject = null) {
+    $f = fopen($cacheFilename, 'w');
+    fwrite($f, json_encode($cacheThisObject, JSON_PRETTY_PRINT));
+    fclose($f);
+}
+
+/* get the channel name */
+function get_channel_by_name($channel_name = null) {
+    $all_channels = slack_api_request('conversations.list', [
+        'limit' => 500,
+        'Content-type' => 'text/html',
+        'exclude_archived' => true
+    ]);
+    if (isset($all_channels['channels'])) {
+        foreach ($all_channels['channels'] as $channel) {
+            if ($channel['name'] == $channel_name) {
+                return $channel;
+            }
+        }
+    }
+    return null;
+}
+
+/* get user name for specific userid */
+function user_id_to_name($userId = null) {
+    $userinfo = '';
+    if (!empty($userId)) {
+        $userinfo = slack_api_request('users.info', [
+            'user' => $userId,
+            'Content-type' => 'text/html',
+        ]);
+    }
+
+    if (!empty($userinfo['user']['real_name'])) {
+        return $userinfo['user']['real_name'];
+    } else {
+        return 'Unknown';
+    }
+    return null;
+}
+
+function coloncode_to_emoji($coloncode = null) {
+    $all_emojis = get_all_emojis();
+
+    $emoji = !empty($all_emojis[$coloncode]) ? $all_emojis[$coloncode] : '';
+    if ($emoji) {
+        if (substr($emoji, 0, 8) == 'https://') {
+            return '<img class="emoji" src="' . $emoji . '" title="' . $coloncode . '">';
+        }
+
+        if (substr($emoji, 0, 6) == 'alias:') {
+            return coloncode_to_emoji(substr($coloncode, 6));
+        }
+
+        return $emoji;
+    }
+
+    return '';
+}
+
+function replace_slack_tags($text = null, $type = null) {
+    $text = preg_replace_callback(
+        '/<@([a-zA-Z0-9]+)>/',
+        function ($matches) {
+            return user_id_to_name($matches[1]);
+        },
+        $text
+    );
+    if ($type == 'emoji') {
+
+        $text = coloncode_to_emoji($text);
+    }
+    $text = preg_replace_callback(
+        '/<(https?:\/\/.+?)\\|([^>]+?)>/',
+        function ($matches) {
+            return ' <a target="_top" href="' . $matches['1'] . '" target="_blank">' . $matches[2] . '</a> ';
+        },
+        $text
+    );
+    $text = preg_replace_callback(
+        '/<(https?:\/\/.+?)>/',
+        function ($matches) {
+            return ' <a target="_top" href="' . $matches['1'] . '" target="_blank">' . $matches[1] . '</a> ';
+        },
+        $text
+    );
+    $text = preg_replace(
+        '/<#[a-zA-Z0-9]+\|([a-zA-Z0-9æøåÅÆØäöÄÖ\-_]+)>/',
+        '#$1',
+        $text
+    );
+    // 3+ are replaced with just two
+    $text = preg_replace("/\n{3,}/", "\n\n", $text);
+
+    return $text;
+}
+
+function render_reactions($reactions = null) {
+    $html = '';
+    foreach ($reactions as $r) {
+        $emoji = $r['name'];
+        $skin_modifier_pos = stripos($emoji, '::');
+        if ($skin_modifier_pos) {
+            $emoji = substr($emoji, 0, $skin_modifier_pos);
+        }
+
+        $html .= '<span class="reaction"><i title="' . $emoji . '">' . coloncode_to_emoji($emoji) . '</i> <small>' . $r['count'] . '</small>' . '</span>';
+    }
+
+    return $html;
+}
+
+/* geting the profile image */
+function render_avatar($slackimage = null) {
+    return '<img class="avatar" src="' . $slackimage . '" aria-hidden="true" title="">';
+}
+
+/* getting user details */
+function render_userinfo($message = null, $userinfo = null) {
+    $html = '<strong class="username" data-uid="' . $userinfo['user']['id'] . '">' . $userinfo['user']['real_name'] . '</strong> ';
+
+    $html .= '<small class="timestamp">' . date('M jS \a\t g:i a', $message['ts']) . '</small>';
+
+    return $html;
+}
+
+/* getting user attachment such as image url */
+function get_file_access_url($public_url = null) {
+    if ($public_url != '') {
+        $dom = new \DomDocument();
+        @$dom->loadHTMLFile($public_url);
+        $elements = $dom->getElementsByTagName('img');
+        $imgsrc = '';
+        foreach ($elements as $node) {
+            $imgsrc = !empty($node->getAttribute('src')) ? $node->getAttribute('src') : '';
+        }
+        return $imgsrc;
+    }
+    return null;
+}
+
+function render_user_message($message = null, $userinfo = null) {
+    $mesages = $filesmesages = $user_attachment = '';
+    $html = '<div class="slack-message">';
+    if (isset($message['files'])) {
+        $file_attachments = $message['files'];
+        foreach ($file_attachments as $key => $img) {
+            if (($message['upload']) == true) {
+                $mesages .= $img['title'];
+            }
+            if ($img['filetype'] != "png" && $img['filetype'] != "jpg" && $img['filetype'] != "jpeg") {
+                if (isset($img['name'])) {
+                    $user_attachment .= '<a target="_Blank" href="' . $img['permalink_public'] . '">' . $img['name'] . '</a>';
+                }
+            } else {
+                if (isset($img['permalink_public'])) {
+                    $user_attachment .= '<img src="' . get_file_access_url($img['permalink_public']) . '">';
+                }
+            }
+        }
+    }
+    if (isset($message['parent_user_id'])) {
+        return '';
+    }
+
+    $html .= '<div class="slack-author">';
+
+    $html .= '<div class="flex-wrapper">';
+
+    $slackimage = 'default image path';
+    if (!empty($userinfo['user']['profile']['image_48'])) {
+        $slackimage = $userinfo['user']['profile']['image_48'];
+    }
+    $html .= render_avatar($slackimage);
+
+    $html .= '<div class="author-content">';
+    $html .= render_userinfo($message, $userinfo);
+    if (isset($message['blocks'])) {
+        foreach ($message['blocks'] as $block) {
+            foreach ($block['elements'][0]['elements'] as $messagetype) {
+                if ($messagetype['type'] == 'emoji') {
+                    $mesages .= replace_slack_tags($messagetype['name'], $messagetype['type']);
+                }
+                if ($messagetype['type'] == 'text') {
+                    $mesages .= replace_slack_tags($messagetype['text'], $messagetype['type']);
+                }
+                if ($messagetype['type'] == 'link') {
+                    $url = $messagetype['url'];
+                    if (!empty($messagetype['text'])) {
+                        $mesages .= "<a target=\"_BLANK\" href=\"$url\">" . $messagetype['text'] . "</a>";
+                    }
+                }
+            }
+        }
+    } else if (isset($message['files'])) {
+        $mesages .= $message['text'];
+    } else if (isset($message['bot_id'])) {
+        if ($message['type'] == 'message') {
+            $mesages .= $message['text'];
+        }
+    }
+
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '<div class="content-message">' . $user_attachment . " " . $mesages;
+    $html .= '</div>';
+
+    if (isset($message['reactions'])) {
+        $html .= render_reactions($message['reactions']);
+    }
+    $html .= '</div>'; // slack-message
+    return $html;
+}
+
+function render_channel_join($message, $userinfo) {
+    $html = '<div class="slack-message">';
+    $user_attachment = '';
+    $mesages = $filesmesages = '';
+
+    $html .= '<div class="slack-author">';
+
+    $html .= '<div class="flex-wrapper">';
+
+    $slackimage = 'default image path';
+    if (!empty($userinfo['user']['profile']['image_48'])) {
+        $slackimage = $userinfo['user']['profile']['image_48'];
+    }
+    $html .= render_avatar($slackimage);
+
+    $html .= '<div class="author-content">';
+    $html .= '<strong class="username" >' . $userinfo['user']['real_name'] . '</strong> ';
+    $html .= '<small class="timestamp">' . date('M jS \a\t g:i a', $message['ts']) . '</small>';
+    $html .= '</div>';
+
+    $html .= '</div>';
+    $html .= '</div>';
+    $message['text'] = preg_replace_callback(
+        '/<@([a-zA-Z0-9]+)>/',
+        function ($matches) {
+            return user_id_to_name($matches[1]);
+        },
+        $message['text']
+    );
+    $html .= '<div class="content-message">' . $message['text'] . '</div>';
+
+    $html .= '</div>';
+    return $html;
+}
+
+// rendering slack-message
+function render_bot_message($message = null, $username = null) {
+    $type = '';
+    $html = '<div class="slack-message">';
+    if (isset($message['parent_user_id'])) {
+        return '';
+    }
+    $slackimage = 'image path';
+    if (!empty($message['icons']['image_48'])) {
+        $slackimage = $message['icons']['image_48'];
+    }
+    $html .= '<div class="slack-author">';
+    $html .= '<div class="flex-wrapper">';
+    $html .= '<img class="avatar" src="' . $slackimage . '" aria-hidden="true" title="">';
+    $html .= '<div class="author-content">';
+    $html .= '<strong class="username">' . $username . '</strong> ';
+    $html .= '<small class="timestamp">' . date('M jS \a\t g:i a', $message['ts']) . '</small>';
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '</div>';
+    $html .= '<div class="content-message">' . replace_slack_tags($message['text'], $type) . '</div>';
+    if (isset($message['reactions'])) {
+        $html .= render_reactions($message['reactions']);
+    }
+
+    $html .= '</div>';
+    return $html;
+}
+
+// Checking slack attachments
+function get_slackattachments($fid = null) {
+    $query_obj = \Drupal::database()->select('slackattachments', 't');
+    $query_obj->addField('t', 'uid');
+    $query_obj->addField('t', 'slack_fid');
+    $query_obj->condition('t.slack_fid', $fid, '=');
+    $uid = $query_obj->execute()->fetchField();
+    if ($uid != '') {
+        $user = \Drupal\user\Entity\User::load($uid);
+        $loggedin_user = $user->getUsername();
+        $user_list = get_all_users();
+        return get_user_id($loggedin_user, $user_list);
+    }
+    return null;
+}
+
+/* get user id */
+function get_user_id($loggedin_user = null, $user_list = null) {
+    if (isset($user_list)) {
+        foreach ($user_list as $userid) {
+            if ($userid['name'] == $loggedin_user) {
+                return $userid['id'];
+            }
+        }
+    }
+    return null;
+}
+
+function render_file_message($message = null, $userinfo = null) {
+    $type = '';
+    $slackimage = 'image path';
+    if (!empty($userinfo['user']['profile']['image_48'])) {
+        $slackimage = $userinfo['user']['profile']['image_48'];
+    }
+    $file = $message['file'];
+    $html = '<div class="slack-message">';
+    $html .= render_avatar($slackimage);
+    $html .= '<div class="content file">';
+    if ($file['pretty_type'] === 'Post') {
+        $html .= render_userinfo($message, $userinfo);
+        $html .= '<div class="document">';
+        $html .= '<h2>' . $file['title'] . '</h2>';
+        $html .= '<hr>';
+        $html .= $file['preview'];
+        $html .= '<a class="readmore" target="_top" href="' . $file['permalink_public'] . '"></a>';
+        $html .= '</div>';
+    } else {
+        $html .= '<div class="message">' . replace_slack_tags($message['text'], $type) . '</div>';
+    }
+    $html .= render_reactions($file['reactions']);
+    $html .= '</div>';
+    $html .= '</div>';
+    return $html;
+}
+
+/* get a message */
+
+function render_message($message = null) {
+    $html = '';
+
+    if (!empty($message['user'])) {
+        $userinfo = slack_api_request('users.info', [
+            'user' => $message['user'],
+            'Content-type' => 'text/html',
+        ]);
+    }
+    switch ($message['type']) {
+        case 'message':
+            if (empty($message['subtype'])) {
+                return render_user_message($message, $userinfo);
+            }
+            if (isset($message['subtype'])) {
+                switch ($message['subtype']) {
+                    case 'file_share':
+                        return render_file_message($message, $userinfo);
+                    case 'bot_message':
+                        return render_bot_message($message, $message['username']);
+                    case 'channel_join':
+                        return render_channel_join($message, $userinfo);
+                    default:
+                        return;
+                }
+            }
+        default:
+            return;
+    }
+}
