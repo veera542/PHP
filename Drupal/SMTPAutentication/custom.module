@@ -1,0 +1,18 @@
+function skin_diseases_custom_mail($key, &$message, $params)
+{
+    switch ($key) {
+        case 'contact':
+            $body =
+                "Hi, <br><br>
+                A user has submitted message. Below are the details:<br><br>
+                User: " . $params['name'] . "<br>
+                Email: " . $params['email'] . "<br>
+                Message: " . $params['message'] . "<br><br><br>
+
+                <br><br>Thank you";
+            $message['from'] = $params['email'];
+            $message['subject'] = $params['subject'];
+            $message['body'][] = $body;
+            break;
+    }
+}
