@@ -1,6 +1,6 @@
 <?php
 
-require_once('UserController.php');
+require_once('User.php');
 
 session_start();
 
