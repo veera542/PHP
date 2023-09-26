@@ -10,7 +10,6 @@
                     url: "upload.php",
                     type: "POST",
                     data: new FormData(this),
-                    contentType: false,
                     cache: false,
                     success: function (data) {
                         $("#targetLayer").html(data);
